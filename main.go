@@ -25,7 +25,6 @@ func main() {
 	// 1. 環境変数から LINE Bot シークレット・トークン・ユーザーIDを取得
 	channelSecret := os.Getenv("LINE_CHANNEL_SECRET")
 	channelToken := os.Getenv("LINE_CHANNEL_ACCESS_TOKEN")
-	userID := os.Getenv("LINE_USER_ID")
 
 	// 2. LINE Bot クライアントを初期化
 	bot, err := linebot.New(channelSecret, channelToken)
@@ -48,8 +47,8 @@ func main() {
 				return
 			}
 			msg := fmt.Sprintf("%s の PRiVACE 特急予約はこちら！%s", target.Format("2006-01-02"), url)
-			if _, err := bot.PushMessage(userID, linebot.NewTextMessage(msg)).Do(); err != nil {
-				log.Printf("Push メッセージエラー(7:45): %v", err)
+			if _, err := bot.BroadcastMessage(linebot.NewTextMessage(msg)).Do(); err != nil {
+				log.Printf("BroadCast メッセージエラー(7:45): %v", err)
 			}
 		}
 	})
@@ -65,8 +64,8 @@ func main() {
 				return
 			}
 			msg := fmt.Sprintf("%s の PRiVACE 特急予約はこちら！%s", target.Format("2006-01-02"), url)
-			if _, err := bot.PushMessage(userID, linebot.NewTextMessage(msg)).Do(); err != nil {
-				log.Printf("Push メッセージエラー(23:55): %v", err)
+			if _, err := bot.BroadcastMessage(linebot.NewTextMessage(msg)).Do(); err != nil {
+				log.Printf("BroadCast メッセージエラー(23:55): %v", err)
 			}
 		}
 	})
@@ -106,6 +105,29 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
+	http.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
+		// ?date=2025-05-13 のように YYYY-MM-DD 形式で日付を渡す
+		q := r.URL.Query().Get("date")
+		if q == "" {
+			http.Error(w, "date query parameter required", http.StatusBadRequest)
+			return
+		}
+		// パース
+		target, err := time.ParseInLocation("2006-01-02", q, loc)
+		if err != nil {
+			http.Error(w, "invalid date format, use YYYY-MM-DD", http.StatusBadRequest)
+			return
+		}
+		// 取得
+		trainURL, err := fetchTrainURL(target, KATSURA, OSAKAUMEDA, "07", "40")
+		if err != nil {
+			http.Error(w, fmt.Sprintf("fetchTrainURL error: %v", err), http.StatusInternalServerError)
+			return
+		}
+		// 結果をそのまま返す
+		w.Write([]byte(trainURL))
+	})
+
 	// 8. サーバ起動
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -133,7 +155,10 @@ func fetchTrainURL(
 	from, to, hour, minute string,
 ) (string, error) {
 	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Jar: jar}
+	client := &http.Client{
+		Jar:     jar,
+		Timeout: 15 * time.Second,
+	}
 
 	// GET search.html
 	resp, err := client.Get("https://privace.hankyu.co.jp/order/search.html")
@@ -172,6 +197,7 @@ func fetchTrainURL(
 		strings.NewReader(data.Encode()),
 	)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; PrivaceBot/1.0)")
 	resp2, err := client.Do(req)
 	if err != nil {
 		return "", err
