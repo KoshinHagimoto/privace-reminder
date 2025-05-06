@@ -46,7 +46,7 @@ func main() {
 				log.Printf("URL取得失敗(7:45): %v", err)
 				return
 			}
-			msg := fmt.Sprintf("%s の PRiVACE 特急予約はこちら！%s", target.Format("2006-01-02"), url)
+			msg := fmt.Sprintf("%s の PRiVACE 特急予約はこちら！%s", target.Format("2006年1月2日"), url)
 			if _, err := bot.BroadcastMessage(linebot.NewTextMessage(msg)).Do(); err != nil {
 				log.Printf("BroadCast メッセージエラー(7:45): %v", err)
 			}
@@ -63,7 +63,7 @@ func main() {
 				log.Printf("URL取得失敗(23:55): %v", err)
 				return
 			}
-			msg := fmt.Sprintf("%s の PRiVACE 特急予約はこちら！%s", target.Format("2006-01-02"), url)
+			msg := fmt.Sprintf("%s の PRiVACE 特急予約はこちら！%s", target.Format("2006年1月2日"), url)
 			if _, err := bot.BroadcastMessage(linebot.NewTextMessage(msg)).Do(); err != nil {
 				log.Printf("BroadCast メッセージエラー(23:55): %v", err)
 			}
@@ -71,9 +71,26 @@ func main() {
 	})
 	c.Start()
 
-	// 6. Webhook ハンドラ (/callback)
-	http.HandleFunc("/callback", func(w http.ResponseWriter, req *http.Request) {
-		events, err := bot.ParseRequest(req)
+	// 5. Webhook ハンドラ
+	http.HandleFunc("/callback", callbackHandler(bot))
+
+	// 6. テスト用フォームと /test
+	http.HandleFunc("/form", formHandler)
+	http.HandleFunc("/test", testHandler(loc))
+
+	// 8. サーバ起動
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("サーバ起動: :%s", port)
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", port), nil))
+}
+
+// callbackHandler は Webhook 受信処理を返す
+func callbackHandler(bot *linebot.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		events, err := bot.ParseRequest(r)
 		if err != nil {
 			if err == linebot.ErrInvalidSignature {
 				w.WriteHeader(http.StatusBadRequest)
@@ -84,57 +101,59 @@ func main() {
 		}
 		for _, event := range events {
 			if event.Type == linebot.EventTypeMessage {
-				switch event.Message.(type) {
-				case *linebot.TextMessage:
-					// デフォルトメッセージを変更
+				if _, ok := event.Message.(*linebot.TextMessage); ok {
 					defaultMsg := "PRiVACE座席予約サイトはこちら！\nhttps://privace.hankyu.co.jp/order/search.html"
-					if _, err := bot.ReplyMessage(
-						event.ReplyToken,
-						linebot.NewTextMessage(defaultMsg),
-					).Do(); err != nil {
-						log.Printf("Reply エラー: %v", err)
-					}
+					bot.ReplyMessage(event.ReplyToken, linebot.NewTextMessage(defaultMsg)).Do()
 				}
 			}
 		}
 		w.WriteHeader(http.StatusOK)
-	})
+	}
+}
 
-	// 7. ヘルスチェックエンドポイント
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("OK"))
-	})
+// formHandler は /form で入力フォームを表示
+func formHandler(w http.ResponseWriter, r *http.Request) {
+	html := `<!DOCTYPE html>
+			<html><body>
+			<form action="/test" method="get">
+			Date (YYYY-MM-DD): <input type="date" name="date" value="2025-05-13" /><br>
+			Hour (HH): <input type="text" name="hour" value="07" size="2" /><br>
+			Minute (MM): <input type="text" name="minute" value="40" size="2" /><br>
+			<input type="submit" value="Check train.html" />
+			</form>
+			</body></html>`
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(html))
+}
 
-	http.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
-		// ?date=2025-05-13 のように YYYY-MM-DD 形式で日付を渡す
+// testHandler は /test で実際の train.html 取得URLを返す
+func testHandler(loc *time.Location) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query().Get("date")
 		if q == "" {
 			http.Error(w, "date query parameter required", http.StatusBadRequest)
 			return
 		}
-		// パース
 		target, err := time.ParseInLocation("2006-01-02", q, loc)
 		if err != nil {
-			http.Error(w, "invalid date format, use YYYY-MM-DD", http.StatusBadRequest)
+			http.Error(w, "invalid date format", http.StatusBadRequest)
 			return
 		}
-		// 取得
-		trainURL, err := fetchTrainURL(target, KATSURA, OSAKAUMEDA, "07", "40")
+		hour := r.URL.Query().Get("hour")
+		minute := r.URL.Query().Get("minute")
+		if hour == "" {
+			hour = "07"
+		}
+		if minute == "" {
+			minute = "40"
+		}
+		url, err := fetchTrainURL(target, KATSURA, OSAKAUMEDA, hour, minute)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("fetchTrainURL error: %v", err), http.StatusInternalServerError)
 			return
 		}
-		// 結果をそのまま返す
-		w.Write([]byte(trainURL))
-	})
-
-	// 8. サーバ起動
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+		w.Write([]byte(url))
 	}
-	log.Printf("サーバ起動: :%s", port)
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", port), nil))
 }
 
 // isBusinessDay: 平日かつ祝日判定
@@ -150,10 +169,7 @@ func isBusinessDay(t time.Time) bool {
 }
 
 // fetchTrainURL: 指定の検索条件で train.html へ遷移後の URL を返す
-func fetchTrainURL(
-	target time.Time,
-	from, to, hour, minute string,
-) (string, error) {
+func fetchTrainURL(target time.Time, from, to, hour, minute string) (string, error) {
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{
 		Jar:     jar,
@@ -189,6 +205,9 @@ func fetchTrainURL(
 	data.Set("searchForm:baseTimeMinutes", minute)
 	data.Set("searchForm:isDepartureBase", "true")
 	data.Set("searchForm:isArrivalBase", "false")
+	data.Set("searchForm:departure", "桂")
+	data.Set("searchForm:destination", "大阪梅田")
+	data.Set("searchForm:doSearch", "検索する")
 
 	// POST 実行
 	req, _ := http.NewRequest(
@@ -198,11 +217,34 @@ func fetchTrainURL(
 	)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; PrivaceBot/1.0)")
+	req.Header.Set("Referer", "https://privace.hankyu.co.jp/order/search.html")
+
 	resp2, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp2.Body.Close()
+
+	doc2, err := goquery.NewDocumentFromReader(resp2.Body)
+	if err != nil {
+		return "", err
+	}
+
+	if metaURL, exists := doc2.Find(`meta[property="og:url"]`).Attr("content"); exists {
+		log.Println("meta URL found:", metaURL)
+		return metaURL, nil
+	}
+
+	if action, ok := doc2.Find("form#trainForm").Attr("action"); ok {
+		log.Println("action found trainForm: ", action)
+		return "https://privace.hankyu.co.jp" + action, nil
+	}
+
+	if action, exists := doc2.Find("form#header1Form").Attr("action"); exists {
+		// 絶対 URL を組み立て
+		log.Println("action found header1Form: ", action)
+		return "https://privace.hankyu.co.jp" + action, nil
+	}
 
 	// リダイレクト先 URL
 	return resp2.Request.URL.String(), nil
